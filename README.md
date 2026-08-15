@@ -1,107 +1,202 @@
-# URL Shortener API
+# URL Shortener (Scalable)
 
-A backend service for shortening URLs, built primarily to demonstrate a Redis caching layer in front of PostgreSQL for cutting down lookup latency on repeat requests.
+A backend URL shortener built with Express 5, PostgreSQL, and Redis. Includes short link creation with optional expiry, click/stat tracking, cache-backed redirects, and per-route rate limiting. Fully containerized with Docker Compose.
 
-## Overview
+## Features
 
-The service exposes two endpoints: one to create a short code for a URL, and one to redirect from a short code back to the original URL. The redirect path is where the caching lives, built around a cache-aside pattern with Redis sitting in front of Postgres.
+- **Shorten & redirect** — generate a 6-character short code for any URL, with optional expiry (in seconds)
+- **Redis-backed redirects** — cache-first lookups on redirect, falling back to Postgres on a miss
+- **Click tracking** — per-code click counts and last-clicked timestamp, tracked in Redis
+- **Cache metrics** — global cache hit/miss stats via `/stats/cache`
+- **Rate limiting** — fixed-window rate limiting per IP, configurable per route
+- **Dockerized** — app, Postgres, and Redis run via a single `docker compose up`
 
-## Why Redis is here
+## Tech Stack
 
-Every hit on a short link normally means a database lookup. But short links get repeated traffic, a link shared once gets clicked hundreds of times, all pointing at the same code and the same unchanged data. Most of those lookups don't need to touch the database at all.
+| Layer      | Tech                        |
+|------------|------------------------------|
+| Runtime    | Node.js 22, Express 5        |
+| Database   | PostgreSQL                   |
+| Cache      | Redis (redis-stack)          |
+| Container  | Docker, Docker Compose        |
 
-Redis caches the result of a lookup for 1 hour after the first request. On a cache hit, the redirect is served straight from memory, no database round trip. On a miss, the app falls back to Postgres, then writes the result into Redis so the next request for that code is fast.
+## Project Structure
 
 ```
-GET /:code
-   |
-   v
-Check Redis --- hit ---> return cached URL, redirect
-   |
-  miss
-   |
-   v
-Query Postgres --> cache result in Redis (TTL: 1hr) --> redirect
+.
+├── docker/
+│   └── init.sql
+├── src/
+│   ├── controllers/
+│   │   └── urlController.js
+│   ├── db/
+│   │   └── postgres.js
+│   ├── routes/
+│   │   └── urlRoutes.js
+│   ├── services/
+│   │   ├── rateLimit.js
+│   │   ├── redisService.js
+│   │   └── urlService.js
+│   ├── app.js
+│   └── server.js
+├── compose.yaml
+├── Dockerfile
+├── package.json
+└── .env
 ```
 
-## Tech stack
+## Getting Started
 
-- **Node.js / Express** — HTTP layer
-- **PostgreSQL** — persistent storage for URL mappings
-- **Redis** — caching layer for read-heavy lookups
-- **Docker Compose** — runs Postgres and Redis locally
+### Prerequisites
 
-## API
+- Docker & Docker Compose
+
+### Setup
+
+1. Clone the repo and add a `.env` file in the project root:
+
+   ```env
+   PORT=5000
+
+   POSTGRES_USER=postgres
+   POSTGRES_PASSWORD=postgres
+   POSTGRES_HOST=postgres
+   POSTGRES_PORT=5432
+   POSTGRES_DB=mydatabase
+
+   REDIS_HOST=redis
+   REDIS_PORT=6379
+   ```
+
+2. Start the stack:
+
+   ```bash
+   docker compose up --build
+   ```
+
+3. The app is available at `http://localhost:5000`.
+
+### Running Locally (without Docker)
+
+```bash
+npm install
+npm start
+```
+
+Make sure Postgres and Redis are running and reachable at the hosts/ports set in `.env`.
+
+## API Reference
 
 ### Create a short URL
 
 ```
 POST /urls
-Content-Type: application/json
-
-{ "url": "https://example.com/some/very/long/path" }
 ```
 
-Response:
+**Body**
+
+```json
+{
+  "url": "https://example.com/some/very/long/path",
+  "expiresIn": 3600
+}
+```
+
+`expiresIn` is optional — pass `null` (or omit handling for it) for a link that never expires. Value is in seconds.
+
+**Response** `201`
 
 ```json
 {
   "originalUrl": "https://example.com/some/very/long/path",
-  "shortCode": "aZ3kD9"
+  "shortCode": "aZ3kQ9",
+  "expires_at": "2026-08-16T14:30:00.000Z"
 }
 ```
 
-### Redirect to the original URL
+### Redirect
 
 ```
 GET /:code
 ```
 
-Redirects (302) to the original URL if the code exists, otherwise returns a 404.
+Redirects to the original URL if it exists and hasn't expired. Returns `404` otherwise.
 
-## Getting started
-
-### 1. Clone and install
-
-```bash
-git clone <repo-url>
-cd <repo-folder>
-npm install
-```
-
-### 2. Set up environment variables
-
-Create a `.env` file in the project root:
+### Get stats for a short code
 
 ```
-PORT=5000
-
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=postgres
-POSTGRES_HOST=postgres
-POSTGRES_PORT=5432
-POSTGRES_DB=mydatabase
-
-REDIS_HOST=redis
-REDIS_PORT=6379
+GET /stats/:code
 ```
 
-### 3. Start Postgres and Redis
+**Response** `200`
 
-```bash
-docker compose up -d
+```json
+{
+  "originalUrl": "https://example.com/some/very/long/path",
+  "createdAt": "2026-08-16T13:30:00.000Z",
+  "expiresAt": "2026-08-16T14:30:00.000Z",
+  "clicks": "12",
+  "lastClicked": "2026-08-16T14:12:03.512Z"
+}
 ```
 
-This spins up Postgres (schema loaded from `docker/init.sql`) and Redis, both exposed on localhost.
+### Get global cache metrics
 
-### 4. Run the app
-
-```bash
-docker compose up --build
+```
+GET /stats/cache
 ```
 
-The API is available at `http://localhost:5000`.
+**Response** `200`
 
-## Notes
+```json
+{
+  "cacheHits": 142,
+  "cacheMisses": 18,
+  "hitRate": "88.75%"
+}
+```
 
-The focus of this project is the caching layer, not the URL shortener itself, so things like custom aliases, link expiration, and click analytics are intentionally left out for now.
+## Rate Limits
+
+| Route              | Limit             |
+|---------------------|-------------------|
+| `POST /urls`         | 10 requests / 60s |
+| `GET /stats/:code`   | 30 requests / 60s |
+| `GET /stats/cache`   | 10 requests / 60s |
+| `GET /:code`         | 50 requests / 60s |
+
+Limits are per IP, tracked in Redis with a fixed window. Exceeding the limit returns `429` with a `retryAfter` field (seconds).
+
+## Environment Variables
+
+| Variable            | Description                     |
+|----------------------|----------------------------------|
+| `PORT`               | Port the app listens on          |
+| `POSTGRES_USER`      | Postgres username                |
+| `POSTGRES_PASSWORD`  | Postgres password                |
+| `POSTGRES_HOST`      | Postgres host                    |
+| `POSTGRES_PORT`      | Postgres port                    |
+| `POSTGRES_DB`        | Postgres database name           |
+| `REDIS_HOST`         | Redis host                       |
+| `REDIS_PORT`         | Redis port                       |
+
+## Benchmarks
+
+_Not yet run — coming soon._
+
+Planned tooling:
+
+- **Unit / integration tests** — Vitest or Jest, covering short code generation, expiry logic, cache hit/miss behavior, and rate limiter windowing.
+- **Load testing** — [autocannon](https://github.com/mcollina/autocannon) against `/urls` (create) and `/:code` (redirect, cache hit vs. cold miss) to measure requests/sec and latency under load.
+
+Planned to track here once available:
+
+| Endpoint            | Tool       | RPS | Latency (p50 / p99) | Notes |
+|----------------------|------------|-----|----------------------|-------|
+| `POST /urls`         | autocannon | —   | —                    | —     |
+| `GET /:code` (hit)   | autocannon | —   | —                    | —     |
+| `GET /:code` (miss)  | autocannon | —   | —                    | —     |
+
+## License
+
+ISC
