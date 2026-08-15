@@ -182,20 +182,22 @@ Limits are per IP, tracked in Redis with a fixed window. Exceeding the limit ret
 
 ## Benchmarks
 
-_Not yet run — coming soon._
+Load testing was performed using **autocannon** against the Redis-backed `GET /:code` redirect endpoint.
 
-Planned tooling:
+### Results
 
-- **Unit / integration tests** — Vitest or Jest, covering short code generation, expiry logic, cache hit/miss behavior, and rate limiter windowing.
-- **Load testing** — [autocannon](https://github.com/mcollina/autocannon) against `/urls` (create) and `/:code` (redirect, cache hit vs. cold miss) to measure requests/sec and latency under load.
+| Concurrent connections | RPS         | Avg Latency | p99 Latency |
+| ---------------------- | ----------- | ----------- | ----------- |
+| 500                    | 4,277 req/s | 116 ms      | 266 ms      |
+| 1,000                  | 3,752 req/s | 264 ms      | 1,196 ms    |
+| 2,000                  | 3,281 req/s | 631 ms      | 2,575 ms    |
 
-Planned to track here once available:
+The Redis hot-cache test maintained a **100% cache hit rate with 0 misses**.
 
-| Endpoint            | Tool       | RPS | Latency (p50 / p99) | Notes |
-|----------------------|------------|-----|----------------------|-------|
-| `POST /urls`         | autocannon | —   | —                    | —     |
-| `GET /:code` (hit)   | autocannon | —   | —                    | —     |
-| `GET /:code` (miss)  | autocannon | —   | —                    | —     |
+As concurrency increased, requests per second started to drop while response times increased sharply.
+
+> These benchmarks were run locally and should not be interpreted as production capacity.
+
 
 ## License
 
